@@ -1,0 +1,20 @@
+# 统一换行符策略：仓库内一律 LF，检出到 Windows 时工作区用 CRLF。
+# 这样 CI（Linux/Windows runner）与本地不会因为换行符产生无意义 diff。
+* text=auto eol=lf
+
+# Python / 文档按文本处理
+*.py    text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.spec  text eol=lf
+*.json  text eol=lf
+LICENSE text eol=lf
+
+# 二进制资源不要做换行符转换
+*.png   binary
+*.ico   binary
+*.wav   binary
+*.fac   binary
+*.exe   binary

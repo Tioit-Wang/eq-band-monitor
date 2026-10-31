@@ -1,0 +1,170 @@
+name: Release
+
+# 触发方式：
+#   1. 推 v* 标签（如 v1.0.0）→ 自动构建并发布 Release
+#   2. 手动触发（Actions 页面 Run workflow）→ 只构建，产物作为 artifact 下载，
+#      不创建 Release。方便在没有 tag 时先验证打包是否正常。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: "创建草稿 Release（仅对 tag 触发有效）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建 Windows exe
+    runs-on: windows-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # 自测作为发布门禁：任何一项失败都不打包，
+      # 避免把"能启动但算错数"的版本发出去。
+      - name: 运行自测
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python selftest.py
+          python selftest_suggest.py
+          python selftest_raw.py
+          python selftest_overlay.py
+
+      - name: 生成图标与版本资源
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python tools/make_icon.py
+          python tools/make_version_info.py
+
+      - name: 打包 exe
+        run: python -m PyInstaller --noconfirm --clean EQBandMonitor.spec
+
+      # 真正的端到端自检：windowed exe 没有 stdout，无法靠 --version 取输出，
+      # 所以启动它、看运行日志里是否打出"热键注册成功 18 个"，再杀掉。
+      # 这一步能抓住 90% 的打包遗漏（缺 Qt 插件、缺 soundcard、缺 assets）。
+      - name: 自检 exe 能否启动
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "dist\EQBandMonitor.exe"
+          if (-not (Test-Path $exe)) { throw "找不到 $exe" }
+
+          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 1)
+          Write-Host "exe 大小: $sizeMB MB"
+          if ($sizeMB -lt 20) { throw "exe 只有 $sizeMB MB，明显缺少依赖" }
+
+          $ver = (Get-Item $exe).VersionInfo
+          Write-Host "版本: $($ver.ProductVersion) / $($ver.ProductName)"
+          if ($ver.ProductVersion -notmatch '^\d+\.\d+\.\d+') {
+            throw "版本资源缺失或格式异常: $($ver.ProductVersion)"
+          }
+
+          $logDir = Join-Path $env:LOCALAPPDATA "EQBandMonitor"
+          if (Test-Path $logDir) { Remove-Item $logDir -Recurse -Force }
+
+          $p = Start-Process $exe -PassThru
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep -Seconds 2
+            if ($p.HasExited) { break }
+            $log = Join-Path $logDir "app.log"
+            if (Test-Path $log) {
+              $text = Get-Content $log -Raw -Encoding utf8
+              if ($text -match "热键注册成功") { $ok = $true; break }
+            }
+          }
+
+          if (-not $p.HasExited) { $p | Stop-Process -Force }
+          Get-Process -Name "EQBandMonitor*" -ErrorAction SilentlyContinue | Stop-Process -Force
+
+          if (-not $ok) {
+            if (Test-Path (Join-Path $logDir "app.log")) {
+              Write-Host "---- app.log ----"
+              Get-Content (Join-Path $logDir "app.log") -Encoding utf8
+            }
+            throw "exe 启动后未完成初始化（未看到热键注册日志）"
+          }
+          Write-Host "exe 自检通过 ✓"
+
+      - name: 计算校验和
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash "dist\EQBandMonitor.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  EQBandMonitor.exe" | Out-File -Encoding ascii "dist\EQBandMonitor.exe.sha256"
+          "SHA256: $hash"
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: EQBandMonitor-windows-x64
+          path: |
+            dist/EQBandMonitor.exe
+            dist/EQBandMonitor.exe.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      # 仅 tag 触发时发布 Release
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/EQBandMonitor.exe
+            dist/EQBandMonitor.exe.sha256
+          draft: ${{ inputs.draft || false }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## 下载
+
+            | 文件 | 说明 |
+            |---|---|
+            | `EQBandMonitor.exe` | 免安装单文件，双击运行（Windows 10/11 x64） |
+            | `EQBandMonitor.exe.sha256` | SHA256 校验和 |
+
+            首次启动若被 SmartScreen 拦截（未签名 exe 的常见行为），
+            点「更多信息」→「仍要运行」。
+
+            ## 使用
+
+            游戏必须以**无边框窗口 / 窗口化全屏**运行，独占全屏会盖住悬浮窗。
+
+            - `Ctrl+Shift+1/2/3` 选移动方式：静步 / 正常走 / 奔跑
+            - `F2`–`F5` 录位置脚步（自己 / 楼下 / 旁边 / 远处）
+            - `F1/F6`–`F9` 录底噪、跳跃、开火、手榴弹、震撼弹
+            - `F10` 生成交接包（`report.md` + `report.json` + 原始 WAV）
+            - `Ctrl+Shift+Q` 退出
+
+            详细说明见 [README](README.md)。
+
+            ## 安全
+
+            不注入进程、不 hook 游戏、不读游戏内存，只用标准 Win32 顶窗 +
+            `RegisterHotKey`，不产生任何声音输出。

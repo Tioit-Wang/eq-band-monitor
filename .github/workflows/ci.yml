@@ -1,0 +1,51 @@
+name: CI
+
+# 日常提交的快速检查：不打包，只跑自测与语法检查。
+# 打包只在 Release（tag 或手动触发）里做，避免每次 push 都跑 5 分钟。
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: 自测（Python ${{ matrix.python-version }}）
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 语法检查
+        run: python -m compileall -q main.py app tools
+
+      - name: 运行自测
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          python selftest.py
+          python selftest_suggest.py
+          python selftest_raw.py
+          python selftest_overlay.py
