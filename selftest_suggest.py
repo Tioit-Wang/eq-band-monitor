@@ -26,7 +26,11 @@ from app.recorder import (  # noqa: E402
 
 SR = 48000
 FAILS: list[str] = []
-USER_FAC = Path(r"C:\Users\Administrator\Documents\FxSound\Presets\Export\暗区突围.fac")
+
+# .fac 测试夹具随仓库分发（tests/fixtures/sample.fac）。
+# 早期版本写死了本机的 FxSound 导出路径，CI 上没有那个文件就会失败 ——
+# 而现在自测是发布门禁，绝不能依赖某台机器上恰好存在的文件。
+USER_FAC = Path(__file__).parent / "tests" / "fixtures" / "sample.fac"
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -84,8 +88,9 @@ if USER_FAC.exists():
     out = fac.render(p)
     check("重新渲染后字节完全一致", out == text,
           f"{len(raw)} vs {len(out.encode('utf-8'))} bytes")
+    check("夹具字节数 976", len(raw) == 976, f"{len(raw)} bytes")
 else:
-    check("找到用户预设文件", False, str(USER_FAC))
+    check("找到 .fac 测试夹具", False, f"缺少 {USER_FAC}")
 
 # ---------- 3. 自由拟合能还原任意频点 ----------
 print("\n[3] 自由拟合：频点由数据决定，不套网格")

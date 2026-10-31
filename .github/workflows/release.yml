@@ -44,17 +44,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
-
       # 自测作为发布门禁：任何一项失败都不打包，
       # 避免把"能启动但算错数"的版本发出去。
+      #
+      # 关键：GitHub 的 run 步骤默认是 `pwsh -command "..."`，
+      # PowerShell **不会**因为原生命令返回非零而中断 —— 不加显式判断的话，
+      # 自测失败会静默通过（实测踩到过）。所以必须逐个检查 $LASTEXITCODE。
       - name: 运行自测
+        shell: pwsh
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          python selftest.py
-          python selftest_suggest.py
-          python selftest_raw.py
-          python selftest_overlay.py
+          $failed = @()
+          foreach ($f in @("selftest.py", "selftest_suggest.py", "selftest_raw.py", "selftest_overlay.py")) {
+            Write-Host "===== $f ====="
+            python $f
+            if ($LASTEXITCODE -ne 0) { $failed += $f }
+          }
+          if ($failed.Count -gt 0) {
+            throw "自测失败: $($failed -join ', ')"
+          }
+          Write-Host "全部自测通过 ✓"
 
       - name: 生成图标与版本资源
         env:

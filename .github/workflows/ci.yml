@@ -41,11 +41,18 @@ jobs:
       - name: 语法检查
         run: python -m compileall -q main.py app tools
 
+      # 同 release.yml：PowerShell 不会因原生命令非零退出而中断，
+      # 必须显式检查每个自测的 $LASTEXITCODE，否则失败会被静默吞掉。
       - name: 运行自测
+        shell: pwsh
         env:
           PYTHONIOENCODING: utf-8
         run: |
-          python selftest.py
-          python selftest_suggest.py
-          python selftest_raw.py
-          python selftest_overlay.py
+          $failed = @()
+          foreach ($f in @("selftest.py", "selftest_suggest.py", "selftest_raw.py", "selftest_overlay.py")) {
+            Write-Host "===== $f ====="
+            python $f
+            if ($LASTEXITCODE -ne 0) { $failed += $f }
+          }
+          if ($failed.Count -gt 0) { throw "自测失败: $($failed -join ', ')" }
+          Write-Host "全部自测通过 ✓"
