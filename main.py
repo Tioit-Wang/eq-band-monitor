@@ -148,6 +148,10 @@ class MonitorApp:
             ("gait_run", "3", True, True),
             ("show_advice", "F10", False, False),
             ("clear_rec", "F11", False, False),
+            # 编辑态：让悬浮窗变成可拖动。默认是锁定穿透的，
+            # 否则窗口会一直"吃掉"游戏里那一块的鼠标点击。
+            ("edit_overlay", "E", True, True),
+            ("reset_pos", "X", True, True),
             ("reset_peak", "R", True, True),
             ("toggle_range", "D", True, True),
             ("hide", "H", True, True),
@@ -227,12 +231,50 @@ class MonitorApp:
         elif name == "reset_peak":
             if self.state.analyzer:
                 self.state.analyzer.reset_peak_hold()
+        elif name == "edit_overlay":
+            self._toggle_overlay_edit()
+        elif name == "reset_pos":
+            self._reset_overlay_pos()
         elif name == "toggle_range":
             self._cycle_range()
         elif name == "hide":
             self.overlay.setVisible(not self.overlay.isVisible())
         elif name == "quit":
             self.shutdown()
+
+
+    # ---------------- 悬浮窗位置 / 编辑态 ----------------
+
+    def _toggle_overlay_edit(self) -> None:
+        """在「锁定穿透」与「可拖动」之间切换。
+
+        为什么需要显式切换而不是"一直可拖"：
+        窗口默认带 WS_EX_TRANSPARENT，游戏里点到它所在区域时事件应该穿透给游戏。
+        如果为了能拖动而常驻可点击，玩家会发现屏幕左上角有一块"死区"，
+        这在 FPS 里是不可接受的。所以拖动是一个显式进入/退出的模式。
+        """
+        if not self.overlay.isVisible():
+            self.overlay.setVisible(True)
+        on = not self.overlay.is_edit_mode()
+        self.overlay.set_edit_mode(on)
+        self.tray.setToolTip(
+            f"{APP_NAME} v{__version__}" + ("（拖动模式）" if on else "")
+        )
+        self._notify(
+            "已进入拖动模式：拖动悬浮窗调整位置，双击或 Ctrl+Shift+E 退出"
+            if on
+            else "已锁定：悬浮窗恢复点击穿透，位置已保存"
+        )
+
+    def _reset_overlay_pos(self) -> None:
+        """把悬浮窗位置恢复到默认，并清掉保存值。"""
+        from app.settings import forget
+
+        self.overlay.set_edit_mode(False, save=False)
+        self.overlay.move(*self.overlay.DEFAULT_POS)
+        forget("overlay_pos")
+        self.tray.setToolTip(f"{APP_NAME} v{__version__}")
+        self._notify("悬浮窗位置已恢复默认")
 
     def _toggle_record(self, key: str) -> None:
         """开始/结束录制。位置型场景会自动拼上当前移动方式。"""
@@ -409,8 +451,18 @@ class MonitorApp:
         self.tray.activated.connect(self._onTrayActivated)
 
         menu = QMenu()
-        menu.addAction(QAction("显示 / 隐藏悬浮窗", menu,
+        menu.addAction(QAction("显示 / 隐藏悬浮窗 (Ctrl+Shift+H)", menu,
                                triggered=lambda: self.overlay.setVisible(not self.overlay.isVisible())))
+
+        # 拖动相关：进/出编辑态 + 位置复位。放在靠前位置，因为这是唯一
+        # 能让用户自己"救回"跑到屏幕外的悬浮窗的入口。
+        dm = menu.addMenu("悬浮窗位置")
+        dm.addAction(QAction("拖动模式开 / 关 (Ctrl+Shift+E)", dm,
+                             triggered=self._toggle_overlay_edit))
+        dm.addAction(QAction("恢复默认位置 (Ctrl+Shift+X)", dm,
+                             triggered=self._reset_overlay_pos))
+
+        menu.addAction(QAction("生成交接包 (F10)", menu, triggered=self._show_advice))
         menu.addAction(QAction("生成交接包 (F10)", menu, triggered=self._show_advice))
         menu.addAction(QAction("清空录制数据 (F11)", menu, triggered=self._clear_recordings))
         menu.addSeparator()

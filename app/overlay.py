@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
+from . import diagnostics, settings
 from .analyzer import BAND_CENTERS, N_BANDS, format_hz
 
 # ---- 配色（呼应截图 EQ 的青蓝高亮）----
@@ -40,53 +41,217 @@ class Overlay(QWidget):
             Qt.FramelessWindowHint
             | Qt.WindowStaysOnTopHint
             | Qt.Tool
-            | Qt.WindowTransparentForInput
             | Qt.NoDropShadowWindowHint
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setFocusPolicy(Qt.NoFocus)
 
         self.resize(520, 268)
-        self.move(24, 24)
+
+        # 拖动状态
+        self._edit_mode = False          # 编辑态才可以拖
+        self._dragging = False
+        self._drag_offset = QPoint()
 
         self._font_small = QFont("Segoe UI", 8)
         self._font_num = QFont("Consolas", 8)
         self._font_title = QFont("Segoe UI Semibold", 9)
+        # 位置：优先用保存值；越界（换显示器/改分辨率）则回落到默认点
+        self.move(self._load_position())
+        self.setMouseTracking(True)
 
-    # ---------------- Windows 层面加固 ----------------
+        # 立刻套用一次穿透状态，不要等 showEvent ——
+        # 否则窗口在显示前是可点击的，短暂的瞬间可能吃掉一次鼠标事件；
+        # 单元测试里窗口从不 show，也就永远等不到那个时机。
+        self._apply_click_through(not self._edit_mode)
+
+    # ---------------- Windows 层面加固 / 点击穿透切换 ----------------
+
+    GWL_EXSTYLE = -20
+    WS_EX_TOPMOST = 0x00000008
+    WS_EX_TRANSPARENT = 0x00000020
+    WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_LAYERED = 0x00080000
+    WS_EX_NOACTIVATE = 0x08000000
 
     def showEvent(self, ev) -> None:
         super().showEvent(ev)
         self._apply_win32_styles()
+        self._apply_click_through(not self._edit_mode)
 
     def _apply_win32_styles(self) -> None:
-        """补上 NoActivate / ToolWindow，确保不进 Alt+Tab、不抢焦点。"""
+        """补上 NoActivate / ToolWindow，确保不进 Alt+Tab、不抢焦点。
+
+        WS_EX_TRANSPARENT 不在这里无条件加 —— 它由 _apply_click_through()
+        按编辑态/锁定态决定，否则编辑态也点不到窗口。
+        """
         try:
             import ctypes
 
-            GWL_EXSTYLE = -20
-            WS_EX_TOPMOST = 0x00000008
-            WS_EX_TRANSPARENT = 0x00000020
-            WS_EX_TOOLWINDOW = 0x00000080
-            WS_EX_LAYERED = 0x00080000
-            WS_EX_NOACTIVATE = 0x08000000
+            hwnd = int(self.winId())
+            user32 = ctypes.windll.user32
+            cur = user32.GetWindowLongW(hwnd, self.GWL_EXSTYLE)
+            new = (
+                cur
+                | self.WS_EX_TOPMOST
+                | self.WS_EX_TOOLWINDOW
+                | self.WS_EX_LAYERED
+                | self.WS_EX_NOACTIVATE
+            )
+            user32.SetWindowLongW(hwnd, self.GWL_EXSTYLE, new)
+        except Exception:
+            pass
+
+    def _apply_click_through(self, enabled: bool) -> None:
+        """开启/关闭鼠标穿透。
+
+        两条路都要走：
+          * Qt 的 WA_TransparentForMouseEvents —— 控制 Qt 是否把事件投给本控件；
+          * Win32 的 WS_EX_TRANSPARENT —— 控制命中测试是否算上这个窗口。
+        只改 Qt 属性时窗口仍会"吃掉"点击（游戏里那一块点不到），
+        只改 Win32 时 Qt 内部仍可能收到事件。两者必须同步。
+        """
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, enabled)
+        try:
+            import ctypes
 
             hwnd = int(self.winId())
             user32 = ctypes.windll.user32
-            cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            new = (
-                cur
-                | WS_EX_TOPMOST
-                | WS_EX_TRANSPARENT
-                | WS_EX_TOOLWINDOW
-                | WS_EX_LAYERED
-                | WS_EX_NOACTIVATE
+            cur = user32.GetWindowLongW(hwnd, self.GWL_EXSTYLE)
+            new = (cur | self.WS_EX_TRANSPARENT) if enabled else (
+                cur & ~self.WS_EX_TRANSPARENT
             )
-            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
+            user32.SetWindowLongW(hwnd, self.GWL_EXSTYLE, new)
         except Exception:
             pass
+
+    # ---------------- 编辑态 / 拖动 ----------------
+
+    DEFAULT_POS = (24, 24)
+
+    def _load_position(self) -> QPoint:
+        """读取保存的位置，并做可见性校验。
+
+        为什么要校验：用户可能拔了副屏、改了分辨率，或上次拖到屏幕外。
+        直接套用会得到"看不见的窗口"，比回到默认位置糟得多。
+        """
+        saved = settings.get("overlay_pos")
+        dx, dy = self.DEFAULT_POS
+        if isinstance(saved, (list, tuple)) and len(saved) == 2:
+            try:
+                sx, sy = int(saved[0]), int(saved[1])
+            except (TypeError, ValueError):
+                return QPoint(dx, dy)
+            if self._is_position_visible(sx, sy):
+                return QPoint(sx, sy)
+            diagnostics.log(f"悬浮窗保存位置 {sx},{sy} 不在任何屏幕上，回落默认位置")
+        return QPoint(dx, dy)
+
+    def _is_position_visible(self, x: int, y: int) -> bool:
+        """标题栏那一条至少有一部分落在某个屏幕内，才算用户还能抓到它。"""
+        try:
+            from PySide6.QtGui import QGuiApplication
+
+            probe_x = x + self.width() // 2
+            probe_y = y + 12
+            for screen in QGuiApplication.screens():
+                g = screen.availableGeometry()
+                if g.left() <= probe_x <= g.right() and g.top() <= probe_y <= g.bottom():
+                    return True
+            return False
+        except Exception:
+            return True  # 判断不了就别拦着
+
+    def is_edit_mode(self) -> bool:
+        return self._edit_mode
+
+    def set_edit_mode(self, on: bool, save: bool = True) -> None:
+        """切换锁定/编辑态。编辑态不穿透、可拖动。"""
+        if on == self._edit_mode:
+            return
+        self._edit_mode = on
+        self._dragging = False
+        self._apply_click_through(not on)
+        if on:
+            # 编辑态需要能拿到键盘/焦点相关的鼠标捕获，先抬到最前
+            self.raise_()
+        elif save:
+            self._save_position()
+        self.update()
+
+    def _save_position(self) -> None:
+        try:
+            pos = self.pos()
+            settings.put("overlay_pos", [int(pos.x()), int(pos.y())])
+            diagnostics.log(f"悬浮窗位置已保存: {pos.x()},{pos.y()}")
+        except Exception:
+            pass
+
+    def _clamp_to_screen(self, pos: QPoint) -> QPoint:
+        """把窗口限制在屏幕可用区域内，至少保证标题栏可抓。"""
+        try:
+            from PySide6.QtGui import QGuiApplication
+
+            screens = QGuiApplication.screens()
+            if not screens:
+                return pos
+            # 找离窗口中心最近的屏幕
+            cx = pos.x() + self.width() // 2
+            cy = pos.y() + self.height() // 2
+            best = min(
+                screens,
+                key=lambda s: (s.geometry().center().x() - cx) ** 2
+                + (s.geometry().center().y() - cy) ** 2,
+            )
+            g = best.availableGeometry()
+            margin = 12
+            min_x, max_x = g.left() - self.width() + margin + 60, g.right() - margin - 60
+            min_y, max_y = g.top() - 0, g.bottom() - margin - 40
+            return QPoint(
+                max(min(pos.x(), max_x), min_x),
+                max(min(pos.y(), max_y), min_y),
+            )
+        except Exception:
+            return pos
+
+    # ---- 鼠标事件：只有编辑态才会收到 ----
+
+    TITLEBAR_H = 26  # 标题栏可拖动区域高度
+
+    def mousePressEvent(self, ev) -> None:
+        if not self._edit_mode or ev.button() != Qt.LeftButton:
+            return super().mousePressEvent(ev)
+        # 允许在标题栏区域按下拖动；其余区域也允许，但视觉上标题栏更符合直觉
+        self._dragging = True
+        self._drag_offset = ev.globalPosition().toPoint() - self.pos()
+        ev.accept()
+
+    def mouseMoveEvent(self, ev) -> None:
+        if not (self._edit_mode and self._dragging):
+            return super().mouseMoveEvent(ev)
+        target = ev.globalPosition().toPoint() - self._drag_offset
+        self.move(target)
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if not self._edit_mode:
+            return super().mouseReleaseEvent(ev)
+        if self._dragging:
+            self._dragging = False
+            # 松手时吸附回屏幕内，避免拖到一半跑出可见范围
+            self.move(self._clamp_to_screen(self.pos()))
+            self._save_position()
+            self.update()
+        ev.accept()
+
+    def mouseDoubleClickEvent(self, ev) -> None:
+        """编辑态下双击标题栏 = 退出编辑态（符合常见窗口习惯）。"""
+        if self._edit_mode and ev.button() == Qt.LeftButton:
+            self.set_edit_mode(False)
+            ev.accept()
+            return
+        super().mouseDoubleClickEvent(ev)
 
     # ---------------- 绘制 ----------------
 
@@ -96,8 +261,15 @@ class Overlay(QWidget):
         p.setRenderHint(QPainter.TextAntialiasing, True)
 
         w, h = self.width(), self.height()
-        p.setBrush(BG)
-        p.setPen(QPen(QColor(255, 255, 255, 26), 1))
+
+        if self._edit_mode:
+            # 编辑态：把底色稍微提亮 + 画虚线边框，一眼能看出"现在处于可拖状态"，
+            # 避免用户以为还在穿透而反复点游戏。
+            p.setBrush(QColor(26, 32, 42, 235))
+            p.setPen(QPen(QColor(34, 211, 238, 170), 1.4, Qt.DashLine))
+        else:
+            p.setBrush(BG)
+            p.setPen(QPen(QColor(255, 255, 255, 26), 1))
         p.drawRoundedRect(QRectF(0.5, 0.5, w - 1, h - 1), 8, 8)
 
         title_h = 24
@@ -113,7 +285,36 @@ class Overlay(QWidget):
         self._draw_spectrum(p, spec_rect)
         self._draw_readout(p, pad, spec_rect.bottom() + 4, w)
         self._draw_footer(p, pad, h - foot_h + 2, w)
+        if self._edit_mode:
+            self._draw_edit_hint(p, w, h)
         p.end()
+
+    def _draw_edit_hint(self, p: QPainter, w: float, h: float) -> None:
+        """编辑态的拖动把手 + 提示条。
+
+        把手画在标题栏右侧（三点竖排），比整块可拖更符合"这里能抓"的直觉。
+        """
+        pad = 10
+        # 拖动把手
+        hx = w - pad - 8
+        cy = pad + 10
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(34, 211, 238, 200))
+        for i in range(3):
+            p.drawEllipse(QPointF(hx, cy - 4 + i * 4), 1.4, 1.4)
+
+        # 底部提示条
+        text = "拖动移动 · 双击回到锁定 · 位置自动保存"
+        p.setFont(self._font_small)
+        fm = QFontMetrics(self._font_small)
+        tw = fm.horizontalAdvance(text) + 16
+        bx = (w - tw) / 2
+        by = h - 20
+        p.setBrush(QColor(34, 211, 238, 36))
+        p.setPen(QPen(QColor(34, 211, 238, 120), 1))
+        p.drawRoundedRect(QRectF(bx, by, tw, 15), 4, 4)
+        p.setPen(ACCENT)
+        p.drawText(QRectF(bx, by, tw, 15), Qt.AlignCenter, text)
 
     def _draw_titlebar(self, p: QPainter, pad: float, th: float, w: float) -> None:
         p.setFont(self._font_title)
