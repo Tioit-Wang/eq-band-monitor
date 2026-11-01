@@ -86,6 +86,8 @@ python main.py
 | `F11` | 清空录制记录（磁盘 WAV 保留） |
 | `Ctrl+Shift+R` | 峰值保持清零 |
 | `Ctrl+Shift+D` | 切换显示范围（60/45/90 dB） |
+| `Ctrl+Shift+E` | 拖动模式开 / 关（进入后可拖动悬浮窗） |
+| `Ctrl+Shift+X` | 悬浮窗位置恢复默认 |
 | `Ctrl+Shift+H` | 隐藏 / 显示悬浮窗 |
 | `Ctrl+Shift+Q` | 退出 |
 
@@ -214,6 +216,11 @@ python -m PyInstaller --noconfirm --clean EQBandMonitor.spec
 
 本软件**不注入进程、不 hook 游戏、不读游戏内存**，只用标准 Win32 顶窗 +
 `RegisterHotKey`，也不产生任何声音输出。
+
+## 路线图
+
+功能取舍的完整辩论记录见 [docs/功能路线评审.md](docs/功能路线评审.md)：
+四个角色（用户代表 / QA / 正方 PM / 反方架构）交叉质询两轮，含实测数据与判决依据。
 
 ## 许可
 
