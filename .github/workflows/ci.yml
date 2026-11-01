@@ -49,7 +49,7 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: |
           $failed = @()
-          foreach ($f in @("selftest.py", "selftest_suggest.py", "selftest_raw.py", "selftest_overlay.py")) {
+          foreach ($f in @("selftest.py", "selftest_wiring.py", "selftest_suggest.py", "selftest_raw.py", "selftest_overlay.py")) {
             Write-Host "===== $f ====="
             python $f
             if ($LASTEXITCODE -ne 0) { $failed += $f }

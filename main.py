@@ -49,6 +49,7 @@ from app.recorder import (
     GAITS,
     GAIT_BY_KEY,
     LOCATIONS,
+    SCENE_BY_KEY,
     SCENES,
     combo_key,
     display_name,
@@ -213,12 +214,15 @@ class MonitorApp:
         self.overlay.update()
 
     # ---------------- 交互 ----------------
-
     def _on_hotkey(self, name: str) -> None:
-        # 场景录制键
-        scene = SCENE_BY_HOTKEY.get(name.upper()) if name in SCENE_BY_HOTKEY else None
-        if scene is None:
-            scene = next((s for s in SCENES if s.key == name), None)
+        # 留一条极轻量的痕迹：热键类 bug 的典型表现是"按了没反应"，
+        # 没有日志就无法区分"按键没进来"和"进来了但处理失败"。
+        # 只在真正触发时写一行，不影响性能。
+        diag.log(f"hotkey: {name}")
+        # HotkeyManager 传来的是**注册名**（即 Scene.key，如 "own"/"fire"），
+        # 所以必须查 SCENE_BY_KEY —— SCENE_BY_HOTKEY 的键是 "F2" 这类热键名，
+        # 用它查永远是 None（原代码的 .upper() 那半句从未生效过）。
+        scene = SCENE_BY_KEY.get(name)
 
         if scene is not None:
             self._toggle_record(scene.key)
@@ -463,7 +467,6 @@ class MonitorApp:
                              triggered=self._reset_overlay_pos))
 
         menu.addAction(QAction("生成交接包 (F10)", menu, triggered=self._show_advice))
-        menu.addAction(QAction("生成交接包 (F10)", menu, triggered=self._show_advice))
         menu.addAction(QAction("清空录制数据 (F11)", menu, triggered=self._clear_recordings))
         menu.addSeparator()
         pm = menu.addMenu("基线预设 (FxSound .fac)")
@@ -484,6 +487,9 @@ class MonitorApp:
         for d in self.devices:
             act = QAction(d.label(), dm, checkable=True)
             act.setChecked(d.index == self.capture.device_index)
+            # 用 data 存设备索引：列表顺序与索引不一致（默认设备被排到最前），
+            # 后续只能靠 data 判断"这一行是哪个设备"。
+            act.setData(d.index)
             act.triggered.connect(lambda _=False, idx=d.index: self._switch_device(idx))
             dm.addAction(act)
             self._dev_actions.append(act)
@@ -516,8 +522,12 @@ class MonitorApp:
     def _switch_device(self, index: int) -> None:
         self.capture.device_name = ""
         self.capture.set_device(index)
-        for i, act in enumerate(self._dev_actions):
-            act.setChecked(i == index)
+        # 必须按设备索引比对，不能用列表位置：
+        # list_devices() 把默认设备排到最前（capture.py 的 out.sort），
+        # 所以列表下标 ≠ 设备索引。早先用 enumerate 的下标去比，
+        # 勾会落在错误行上 —— 恰发生在"采不到声音、手忙脚乱切设备"的时刻。
+        for act in self._dev_actions:
+            act.setChecked(act.data() == index)
         self._notify("已切换采集设备")
 
     def _rescan_devices(self) -> None:
